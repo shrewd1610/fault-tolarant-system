@@ -1,156 +1,136 @@
-import tkinter as tk
-from tkinter import ttk, scrolledtext
-import threading
-import socket
-import time
-import psutil
+import multiprocessing as mp
 import os
-from datetime import datetime
+import time
+import random
+import numpy as np
+from ctypes import c_bool, c_int, c_double
 
-HOST = '0.0.0.0'
-PORT = 65432
+# Pinning helper
+def pin_to_core(core_id):
+    """Pin the current process to a specific CPU core"""
+    pid = os.getpid()
+    os.sched_setaffinity(pid, {core_id})
 
-class MasterGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Master-Slave Communication System with Core Affinity")
-        self.root.geometry("800x600")
+# Shared memory
+FAULT_FLAG = mp.Value(c_bool, False)
+ERROR_CODE = mp.Value(c_int, 0)
+CORRECTION_COUNT = mp.Value(c_int, 0)
+SYSTEM_HEALTH = mp.Value(c_double, 100.0)
 
-        self.client_conn = None
-        self.server_socket = None
-        self.running = False
-        self.comm_count = 0
-        self.start_time = None
+class SimulatedFault(Exception):
+    pass
 
-        self.master_workload = tk.IntVar(value=700000)
-        self.slave_workload = tk.IntVar(value=700000)
+# Core 1
+def primary_worker(health):
+    pin_to_core(0)
+    print("Core 1: Primary worker started")
+    try:
+        iteration = 0
+        while True:
+            task_result = complex_calculation(iteration)
+            if random.random() < 0.15:
+                raise SimulatedFault(f"Core1 fault at iteration {iteration}")
+            time.sleep(0.5)
+            iteration += 1
+            health.value = max(60, health.value - 0.01)
+    except SimulatedFault as e:
+        ERROR_CODE.value = random.randint(100, 999)
+        FAULT_FLAG.value = True
+        print(f"⚠️ Core 1: FAULT DETECTED - {str(e)}")
 
-        self.set_cpu_affinity(0)
-        self.setup_gui()
-        self.start_cpu_monitor()
+# Core 2
+def fault_detector(fault_flag, error_code, health):
+    pin_to_core(1)
+    print("Core 2: Fault detector activated")
+    while True:
+        if memory_corruption_check():
+            error_code.value = 800
+            fault_flag.value = True
+        if computation_validation():
+            error_code.value = 900
+            fault_flag.value = True
+        if timing_violation_check():
+            error_code.value = 700
+            fault_flag.value = True
+        time.sleep(0.1)
 
-    def set_cpu_affinity(self, core):
-        try:
-            psutil.Process(os.getpid()).cpu_affinity([core])
-        except Exception as e:
-            print(f"Affinity error: {e}")
+# Core 3
+def error_corrector(fault_flag, correction_count, health):
+    pin_to_core(2)
+    print("Core 3: Error corrector standing by")
+    while True:
+        if fault_flag.value:
+            print(f"🛠️ Core 3: Correcting error {ERROR_CODE.value}")
+            if 100 <= ERROR_CODE.value < 200:
+                apply_rollback_recovery()
+            elif 700 <= ERROR_CODE.value < 800:
+                adjust_timing_constraints()
+            else:
+                apply_redundant_computation()
+            correction_count.value += 1
+            fault_flag.value = False
+            health.value = min(100, health.value + 2.5)
+        time.sleep(0.1)
 
-    def setup_gui(self):
-        frame = ttk.Frame(self.root, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
+# Core 4
+def health_reporter(correction_count, health):
+    pin_to_core(3)
+    print("Core 4: Health reporter initialized")
+    report_interval = 5
+    last_report = time.time()
+    while True:
+        if time.time() - last_report > report_interval:
+            print("\n" + "="*50)
+            print(f"📊 SYSTEM HEALTH REPORT [{time.strftime('%H:%M:%S')}]")
+            print(f"Current Health: {health.value:.1f}/100")
+            print(f"Total Corrections: {correction_count.value}")
+            if health.value < 75:
+                print("🚨 ACTION REQUIRED: Increase watchdog timer frequency")
+            if correction_count.value > 10:
+                print("🚨 ACTION REQUIRED: Investigate persistent error source")
+            if health.value > 95:
+                print("✅ OPTIMIZATION: Reduce redundancy for efficiency")
+            print("="*50 + "\n")
+            last_report = time.time()
+        time.sleep(0.5)
 
-        ttk.Label(frame, text="Master-Slave Communication System", font=('Helvetica', 14, 'bold')).pack()
+# Simulated check functions
+def complex_calculation(iteration):
+    if random.random() < 0.05:
+        return 1 / (iteration % 10)  # risky division
+    return np.sqrt(iteration) * np.sin(iteration)
 
-        # CPU usage
-        usage_frame = ttk.LabelFrame(frame, text="CPU Usage")
-        usage_frame.pack(fill=tk.X, pady=10)
+def memory_corruption_check():
+    return random.random() < 0.02
 
-        self.master_bar = ttk.Progressbar(usage_frame, maximum=100)
-        self.master_bar.pack(fill=tk.X, padx=5, pady=2)
-        self.master_label = ttk.Label(usage_frame, text="Core 0 (Master): 0.0%")
-        self.master_label.pack()
+def computation_validation():
+    return random.random() < 0.03
 
-        self.slave_bar = ttk.Progressbar(usage_frame, maximum=100)
-        self.slave_bar.pack(fill=tk.X, padx=5, pady=2)
-        self.slave_label = ttk.Label(usage_frame, text="Core 1 (Slave): 0.0%")
-        self.slave_label.pack()
+def timing_violation_check():
+    return random.random() < 0.01
 
-        # Workload
-        ttk.Label(frame, text="Workload Adjustment").pack()
-        ttk.Label(frame, text="Master:").pack()
-        tk.Scale(frame, from_=100000, to=1540000, resolution=10000,
-                 variable=self.master_workload, orient=tk.HORIZONTAL).pack(fill=tk.X)
+def apply_rollback_recovery():
+    time.sleep(0.2)
 
-        ttk.Label(frame, text="Slave:").pack()
-        tk.Scale(frame, from_=100000, to=1540000, resolution=10000,
-                 variable=self.slave_workload, orient=tk.HORIZONTAL).pack(fill=tk.X)
+def adjust_timing_constraints():
+    time.sleep(0.1)
 
-        # Log
-        self.log = scrolledtext.ScrolledText(frame, height=12)
-        self.log.pack(fill=tk.BOTH, expand=True, pady=5)
+def apply_redundant_computation():
+    time.sleep(0.3)
 
-        # Buttons
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill=tk.X, pady=5)
-
-        self.start_btn = ttk.Button(btn_frame, text="Start", command=self.start_server)
-        self.start_btn.pack(side=tk.LEFT, padx=5)
-
-        ttk.Button(btn_frame, text="Clear Log", command=lambda: self.log.delete(1.0, tk.END)).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text="Exit", command=self.on_close).pack(side=tk.RIGHT, padx=5)
-
-    def start_cpu_monitor(self):
-        def monitor():
-            while True:
-                usage = psutil.cpu_percent(interval=1, percpu=True)
-                if len(usage) >= 2:
-                    self.master_bar['value'] = usage[0]
-                    self.master_label.config(text=f"Core 0 (Master): {usage[0]:.1f}%")
-                    self.slave_bar['value'] = usage[1]
-                    self.slave_label.config(text=f"Core 1 (Slave): {usage[1]:.1f}%")
-        threading.Thread(target=monitor, daemon=True).start()
-
-    def start_server(self):
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.bind((HOST, PORT))
-        self.server_socket.listen(1)
-        self.log_message("Listening for slave...")
-        self.start_btn.config(state=tk.DISABLED)
-        threading.Thread(target=self.accept_client, daemon=True).start()
-
-    def accept_client(self):
-        self.client_conn, addr = self.server_socket.accept()
-        self.log_message(f"Connected by {addr}")
-        self.running = True
-        self.start_time = time.time()
-        threading.Thread(target=self.communication_loop, daemon=True).start()
-
-    def simulate_work(self, n):
-        acc = 0
-        for i in range(n):
-            acc += (i % 7) * (i % 5)
- 
-    def communication_loop(self):
-        while self.running and (time.time() - self.start_time < 60):
-            msg = f"DATA_{self.comm_count}|{self.slave_workload.get()}"
-            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            self.simulate_work(self.master_workload.get())
-            try:
-                self.client_conn.sendall(msg.encode())
-                self.log_message(f"{timestamp} Master -> Slave: {msg}")
-                response = self.client_conn.recv(1024).decode()
-                if response:
-                    self.log_message(f"{timestamp} Slave -> Master: {response}")
-                    self.comm_count += 1
-            except Exception as e:
-                self.log_message(f"Error: {e}")
-                break
-            time.sleep(0.05)
-        if self.client_conn:
-            try:
-                self.client_conn.sendall(b"EXIT")
-                self.client_conn.close()
-            except:
-                pass
-        self.log_message("Communication ended.")
-
-    def log_message(self, msg):
-        self.log.insert(tk.END, msg + "\n")
-        self.log.see(tk.END)
-
-    def on_close(self):
-        try:
-            if self.client_conn:
-                self.client_conn.sendall(b"EXIT")
-                self.client_conn.close()
-        except:
-            pass
-        if self.server_socket:
-            self.server_socket.close()
-        self.root.destroy()
-
+# Main
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = MasterGUI(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_close)
-    root.mainloop()
+    print("🚀 Starting Quad-Core Self-Healing System with Core Pinning")
+    processes = [
+        mp.Process(target=primary_worker, args=(SYSTEM_HEALTH,)),
+        mp.Process(target=fault_detector, args=(FAULT_FLAG, ERROR_CODE, SYSTEM_HEALTH)),
+        mp.Process(target=error_corrector, args=(FAULT_FLAG, CORRECTION_COUNT, SYSTEM_HEALTH)),
+        mp.Process(target=health_reporter, args=(CORRECTION_COUNT, SYSTEM_HEALTH)),
+    ]
+    for p in processes:
+        p.start()
+    time.sleep(60)  # Run system for 60 seconds
+    for p in processes:
+        p.terminate()
+
+    print("🛑 System shutdown complete.")
